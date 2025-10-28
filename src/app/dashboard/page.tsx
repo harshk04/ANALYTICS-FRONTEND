@@ -1817,8 +1817,8 @@ export default function DashboardPage() {
         onDismiss={() => setError(null)} 
         type="error" 
       />
-    </div>
-  </div>
+          </div>
+        </div>
       </div>
     </ErrorBoundary>
   );
