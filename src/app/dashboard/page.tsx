@@ -19,6 +19,7 @@ import { getAccessToken, clearAccessToken } from "@/lib/auth";
 
 type GraphItem = components["schemas"]["GraphItem"];
 type DashboardGraph = components["schemas"]["DashboardGraphMetadataModel"];
+type LiveKitTranscript = { role: "user" | "assistant"; text: string };
 
 export default function DashboardPage() {
   const { theme } = useTheme();
@@ -180,21 +181,26 @@ export default function DashboardPage() {
   const [isFirstQuestion, setIsFirstQuestion] = useState(false);
 
   // Voice chat handlers
-  const handleVoiceTranscript = useCallback((text: string) => {
-    if (text.trim()) {
-      setQuestion(text);
-      setCurrentUserQuestion(text.trim());
-      // Auto-send voice transcript
-      setTimeout(() => {
-        if (text.trim()) {
-          setChat((prev) => [...prev, { role: "user", text: text.trim() }]);
-          sendQuestion(text.trim());
-          setQuestion("");
-          setIsAwaitingAnswer(true);
-        }
-      }, 500);
+  const handleVoiceTranscript = useCallback(({ role, text }: LiveKitTranscript) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    setChat((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === role && (last.text || "").trim() === trimmed) {
+        return prev;
+      }
+      return [...prev, { role, text: trimmed }];
+    });
+
+    if (role === "user") {
+      setQuestion("");
+      setCurrentUserQuestion(trimmed);
+      setIsAwaitingAnswer(true);
+    } else {
+      setIsAwaitingAnswer(false);
     }
-  }, []);
+  }, [setChat, setCurrentUserQuestion, setIsAwaitingAnswer, setQuestion]);
 
   const handleVoiceError = useCallback((error: string) => {
     setError(error);
@@ -1906,6 +1912,3 @@ function NewChatButton({ onNew }: { onNew: () => void }) {
     </button>
   );
 }
-
-
-

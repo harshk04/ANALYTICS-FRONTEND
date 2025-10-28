@@ -4,7 +4,7 @@ Getting started
 - Prereqs: Node 20+, npm 10+
 - Configure environment
   - create `.env.local` with:
-    - `NEXT_PUBLIC_API_URL=http://3.111.133.92:8010`
+    - `NEXT_PUBLIC_API_URL=http://localhost:8000`
 - Install and run
   - `npm install`
   - `npm run dev`

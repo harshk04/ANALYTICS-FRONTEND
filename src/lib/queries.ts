@@ -1,10 +1,10 @@
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 import type { components, operations } from "@/types/api";
 import axios from "axios";
 
 // Create a separate API client for LiveKit calls that uses LiveKit agent credentials
 const livekitApi = axios.create({
-  baseURL: typeof window !== 'undefined' ? '' : process.env.NEXT_PUBLIC_API_URL || "",
+  baseURL: API_BASE_URL,
 });
 
 // Add LiveKit agent authentication
@@ -274,5 +274,4 @@ export async function livekitQuery(sessionId: string, payload: components["schem
   const { data } = await livekitApi.post<Record<string, unknown>>(`/livekit/session/${encodeURIComponent(sessionId)}/query`, payload);
   return data;
 }
-
 

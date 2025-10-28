@@ -1,8 +1,10 @@
 import axios from "axios";
 import { getAccessToken, clearAccessToken } from "@/lib/auth";
 
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "");
+
 export const api = axios.create({
-  baseURL: typeof window !== 'undefined' ? '' : process.env.NEXT_PUBLIC_API_URL || "",
+  baseURL: API_BASE_URL,
 });
 
 api.interceptors.request.use((config) => {
@@ -44,5 +46,3 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
-
-

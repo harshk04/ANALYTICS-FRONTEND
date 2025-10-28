@@ -3,10 +3,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Room, RoomEvent, RemoteParticipant, LocalParticipant, Track, LocalAudioTrack, createLocalAudioTrack, createLocalVideoTrack, VideoPresets } from "livekit-client";
 import { livekitCreateSession, livekitEndSession, livekitIssueToken, livekitQuery, livekitIngestTranscript, livekitMetadata } from "@/lib/queries";
+import { API_BASE_URL } from "@/lib/api";
 import { useTheme } from "@/contexts/ThemeContext";
 
+type VoiceTranscript = {
+  role: "user" | "assistant";
+  text: string;
+};
+
 interface VoiceChatProps {
-  onTranscript: (text: string) => void;
+  onTranscript: (payload: VoiceTranscript) => void;
   onError: (error: string) => void;
   isEnabled: boolean;
   onToggle: () => void;
@@ -83,7 +89,7 @@ export default function VoiceChat({
         if (finalTranscript) {
           setCurrentTranscript(finalTranscript);
           // Process the transcript - will be handled by the voice processing system
-          onTranscript(finalTranscript);
+          onTranscript({ role: "user", text: finalTranscript });
         }
       };
       
@@ -165,7 +171,7 @@ export default function VoiceChat({
       try {
         const axios = (await import('axios')).default;
         const sessionAPI = axios.create({
-          baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
+          baseURL: API_BASE_URL,
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
             'Content-Type': 'application/json'
@@ -190,7 +196,7 @@ export default function VoiceChat({
           if (responseText && responseText.trim()) {
             
             // Trigger the transcript callback
-            onTranscript(responseText);
+            onTranscript({ role: "assistant", text: responseText });
             
             // Trigger TTS for the response
             speakText(responseText);
@@ -204,7 +210,7 @@ export default function VoiceChat({
         try {
           const axios = (await import('axios')).default;
           const sessionAPI = axios.create({
-            baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
+            baseURL: API_BASE_URL,
             headers: {
               'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
               'Content-Type': 'application/json'
@@ -232,7 +238,7 @@ export default function VoiceChat({
             if (responseText && responseText.trim()) {
               
               // Trigger the transcript callback
-              onTranscript(responseText);
+              onTranscript({ role: "assistant", text: responseText });
               
               // Trigger TTS for the response
               speakText(responseText);
@@ -324,7 +330,7 @@ export default function VoiceChat({
       // The response should contain the processed text
       if (response && typeof response === 'object') {
         const responseText = (response as any).text || (response as any).message || JSON.stringify(response);
-        onTranscript(responseText);
+        onTranscript({ role: "assistant", text: responseText });
         
         // LiveKit handles TTS on the server side
       }
@@ -395,7 +401,7 @@ export default function VoiceChat({
           });
           
           // Trigger the transcript callback
-          onTranscript(responseText);
+          onTranscript({ role: "assistant", text: responseText });
           
           // Trigger TTS for the response
           speakText(responseText);
@@ -554,11 +560,11 @@ export default function VoiceChat({
           
           if (data.type === 'voice_transcript' && data.text) {
             // Handle voice transcript from LiveKit
-            onTranscript(data.text);
+            onTranscript({ role: "user", text: data.text });
             sendTranscriptToLiveKit(data.text, 'user');
           } else if (data.type === 'voice_response' && data.text) {
             // Handle voice response from LiveKit
-            onTranscript(data.text);
+            onTranscript({ role: "assistant", text: data.text });
             sendTranscriptToLiveKit(data.text, 'assistant');
             
             // Trigger TTS for the response
@@ -756,53 +762,65 @@ export default function VoiceChat({
   return (
     <div className="flex items-center justify-center gap-4">
       {/* Main Voice Controls */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-4">
         {/* Voice Chat Toggle */}
-        <button
-          onClick={onToggle}
-          disabled={isConnecting}
-          className={`relative inline-flex items-center justify-center w-14 h-14 rounded-2xl transition-all duration-300 pressable group ${
-            isEnabled
-              ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50"
-              : theme === "light"
-              ? "bg-white/90 border border-slate-200 hover:bg-emerald-50 hover:border-emerald-300 text-slate-600 hover:text-emerald-600 shadow-sm backdrop-blur-sm"
-              : "bg-white/10 border border-white/20 hover:bg-emerald-500/20 hover:border-emerald-500/50 text-slate-400 hover:text-emerald-400 backdrop-blur-sm"
-          } ${isConnecting ? "opacity-50 cursor-not-allowed" : ""}`}
-          title={isEnabled ? "Disable voice chat" : "Enable voice chat"}
-        >
-          {/* Background glow effect */}
-          {isEnabled && (
-            <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/20 to-teal-500/20 rounded-2xl blur-lg group-hover:blur-xl transition-all duration-300"></div>
-          )}
-          
-          {/* Icon container */}
-          <div className="relative z-10">
-            {isConnecting ? (
-              <div className="w-6 h-6 border-2 border-white/50 border-t-transparent rounded-full animate-spin" />
-            ) : isEnabled ? (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-6 h-6 group-hover:scale-110 transition-transform duration-200">
-                <path d="M7 4a3 3 0 016 0v6a3 3 0 11-6 0V4z" />
-                <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5a.75.75 0 001.5 0v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 11-9 0v-.357z" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-6 h-6 group-hover:scale-110 transition-transform duration-200">
-                <path d="M7 4a3 3 0 016 0v6a3 3 0 11-6 0V4z" />
-                <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5a.75.75 0 001.5 0v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 11-9 0v-.357z" />
-              </svg>
+        <div className="flex flex-col items-center gap-2">
+          <button
+            onClick={onToggle}
+            disabled={isConnecting}
+            className={`relative inline-flex items-center justify-center w-11 h-11 rounded-xl transition-all duration-300 pressable ${
+              isConnected
+                ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-white border border-emerald-400/60 shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50"
+                : "bg-white/5 border border-white/10 text-neutral-400 hover:bg-white/10 hover:border-white/20 dark:bg-white/5 dark:border-white/10 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:border-white/20 light:bg-gray-100/80 light:border-gray-300/60 light:text-gray-600 light:hover:bg-gray-200/90 light:hover:border-gray-400/70"
+            } ${isConnecting ? "opacity-60 cursor-not-allowed" : ""}`}
+            title={isConnected ? "Disconnect LiveKit agent" : "Connect LiveKit agent"}
+            aria-pressed={isConnected}
+          >
+            {/* Background glow effect */}
+            {isConnected && (
+              <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/20 to-teal-500/20 rounded-xl blur-lg transition-all duration-300"></div>
             )}
-          </div>
-          
-          {/* Active indicator */}
-          {isEnabled && (
-            <div className="absolute -top-1 -right-1">
-              <div className="w-4 h-4 bg-emerald-400 rounded-full animate-pulse shadow-lg" />
-              <div className="absolute inset-0 w-4 h-4 bg-emerald-400 rounded-full animate-ping" />
+            
+            {/* Icon container */}
+            <div className="relative z-10">
+              {isConnecting ? (
+                <div className="w-5 h-5 border-2 border-current/60 border-t-transparent rounded-full animate-spin" />
+              ) : isConnected ? (
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" className="w-5 h-5 text-white transition-transform duration-200">
+                  <path d="M6 6l8 8M6 14l8-8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 transition-transform duration-200">
+                  <path d="M7 4a3 3 0 016 0v6a3 3 0 11-6 0V4z" />
+                  <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5a.75.75 0 001.5 0v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 11-9 0v-.357z" />
+                </svg>
+              )}
             </div>
-          )}
-        </button>
+            
+            {/* Active indicator */}
+            {isConnected && (
+              <div className="absolute -top-1 -right-1">
+                <div className="w-3 h-3 bg-emerald-400 rounded-full animate-pulse shadow-lg" />
+                <div className="absolute inset-0 w-3 h-3 bg-emerald-400 rounded-full animate-ping" />
+              </div>
+            )}
+            <span className="sr-only">{isConnected ? "Disconnect LiveKit agent" : "Connect LiveKit agent"}</span>
+          </button>
+          <span
+            className={`text-xs font-medium ${
+              isConnected
+                ? "text-emerald-400"
+                : theme === "light"
+                ? "text-slate-500"
+                : "text-slate-400"
+            }`}
+          >
+            {isConnecting ? "Connecting…" : isConnected ? "Disconnect Agent" : "Connect Agent"}
+          </span>
+        </div>
 
         {/* Enhanced Status Indicator */}
-        {isEnabled && (
+        {isConnected && (
           <div className={`flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all duration-200 ${
             theme === "light"
               ? "bg-gradient-to-r from-emerald-50/90 to-teal-50/90 border border-emerald-200 shadow-sm backdrop-blur-sm"
