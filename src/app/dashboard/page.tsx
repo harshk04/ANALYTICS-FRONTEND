@@ -20,6 +20,7 @@ import { getAccessToken, clearAccessToken } from "@/lib/auth";
 type GraphItem = components["schemas"]["GraphItem"];
 type DashboardGraph = components["schemas"]["DashboardGraphMetadataModel"];
 type LiveKitTranscript = { role: "user" | "assistant"; text: string };
+type TranscriptSummary = { id: string; title: string | null };
 
 export default function DashboardPage() {
   const { theme } = useTheme();
@@ -55,8 +56,12 @@ export default function DashboardPage() {
     }
     return '1fr';
   };
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [chatWidthPercent, setChatWidthPercent] = useState(30);
+  const [isResizingChat, setIsResizingChat] = useState(false);
+  const [transcripts, setTranscripts] = useState<TranscriptSummary[]>([]);
+  const [isLoadingTranscripts, setIsLoadingTranscripts] = useState(false);
   const [notice, setNotice] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const ignoreResponsesRef = useRef(false);
@@ -68,7 +73,8 @@ export default function DashboardPage() {
   const [responseAdded, setResponseAdded] = useState(false);
   const [currentUserQuestion, setCurrentUserQuestion] = useState<string | null>(null);
   const [interimTranscript, setInterimTranscript] = useState("");
-  
+  const layoutRef = useRef<HTMLDivElement | null>(null);
+
   // Local chat persistence per transcript
   function chatStorageKey(tid: string) { return `chat_history:${tid}`; }
   function loadChatFromStorage(tid: string) {
@@ -101,6 +107,177 @@ export default function DashboardPage() {
       noticeTimerRef.current = null;
     }, 1800);
   }
+
+  const loadTranscriptsList = useCallback(async () => {
+    setIsLoadingTranscripts(true);
+    try {
+      const data = await listTranscripts({});
+      const mapped = (Array.isArray(data) ? data : []).map((item) => {
+        const id = extractTranscriptId(item);
+        if (!id) return null;
+        const title = (item as { title?: string | null })?.title ?? null;
+        return { id, title } as TranscriptSummary;
+      }).filter(Boolean) as TranscriptSummary[];
+      setTranscripts(mapped);
+      return mapped;
+    } catch (error) {
+      console.error("Failed to load transcripts:", error);
+      return [];
+    } finally {
+      setIsLoadingTranscripts(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadTranscriptsList();
+  }, [loadTranscriptsList]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts = loadTranscriptsList;
+    return () => {
+      if (typeof window !== "undefined" && (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts === loadTranscriptsList) {
+        delete (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts;
+      }
+    };
+  }, [loadTranscriptsList]);
+
+  const handleTranscriptSelect = useCallback(async (id: string) => {
+    setTranscriptId(id);
+    setDashboardTranscriptId(id);
+    const saved = loadChatFromStorage(id);
+    setChat(Array.isArray(saved) ? saved : []);
+    setIsFirstQuestion(false);
+    setIsAwaitingAnswer(false);
+    setCurrentUserQuestion(null);
+    setChatKey((prev) => prev + 1);
+    ignoreResponsesRef.current = false;
+  }, []);
+
+  const handleCreateNewTranscript = useCallback(async () => {
+    try {
+      const newTranscript = await createTranscript({
+        title: "New Chat",
+        metadata: {
+          created_at: new Date().toISOString(),
+          source: "dashboard",
+        },
+      });
+      const newTranscriptId = extractTranscriptId(newTranscript);
+      if (!newTranscriptId) {
+        throw new Error("Failed to create transcript");
+      }
+      setChat([]);
+      setTranscriptId(newTranscriptId);
+      setDashboardTranscriptId(newTranscriptId);
+      setError(null);
+      ignoreResponsesRef.current = false;
+      setIsAwaitingAnswer(false);
+      setIsFirstQuestion(true);
+      setCurrentUserQuestion(null);
+      setChatKey((prev) => prev + 1);
+      await loadTranscriptsList();
+      showSuccess("New chat started");
+      return newTranscriptId;
+    } catch (error) {
+      console.error("Failed to create new transcript:", error);
+      setError("Failed to create new chat. Please try again.");
+      return null;
+    }
+  }, [loadTranscriptsList]);
+
+  const handleTranscriptDelete = useCallback(async (id: string) => {
+    try {
+      await deleteTranscript(id);
+      if (typeof window !== "undefined") {
+        localStorage.removeItem(chatStorageKey(id));
+      }
+      showSuccess("Chat deleted successfully!");
+      const updated = await loadTranscriptsList();
+      if (transcriptId === id) {
+        if (updated.length > 0) {
+          const fallbackId = updated[0].id;
+          await handleTranscriptSelect(fallbackId);
+        } else {
+          await handleCreateNewTranscript();
+        }
+      }
+    } catch (error) {
+      console.error("Failed to delete transcript:", error);
+      setNotice({ text: "Failed to delete chat. Please try again.", type: "error" });
+    }
+  }, [handleCreateNewTranscript, handleTranscriptSelect, loadTranscriptsList, setNotice, transcriptId]);
+
+  const handleTranscriptRename = useCallback(async (id: string, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+    try {
+      await updateTranscript(id, { title: trimmed });
+      setTranscripts((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, title: trimmed } : item))
+      );
+      showSuccess("Chat renamed");
+    } catch (error) {
+      console.error("Failed to rename transcript:", error);
+      setNotice({ text: "Failed to rename chat. Please try again.", type: "error" });
+    }
+  }, []);
+
+  const clampPercent = useCallback((value: number, min: number, max: number) => {
+    return Math.min(Math.max(value, min), max);
+  }, []);
+
+  const updateChatWidthFromPointer = useCallback((clientX: number | null) => {
+    if (!layoutRef.current || clientX === null || Number.isNaN(clientX)) return;
+    const bounds = layoutRef.current.getBoundingClientRect();
+    if (bounds.width <= 0) return;
+    const relativeX = clampPercent(clientX - bounds.left, 0, bounds.width);
+    const dashboardPercent = (relativeX / bounds.width) * 100;
+    const newChatPercent = clampPercent(100 - dashboardPercent, 20, 60);
+    setChatWidthPercent(newChatPercent);
+  }, [clampPercent]);
+
+  useEffect(() => {
+    if (!isResizingChat) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      updateChatWidthFromPointer(event.clientX);
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      updateChatWidthFromPointer(touch ? touch.clientX : null);
+    };
+    const stopResizing = () => {
+      setIsResizingChat(false);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", stopResizing);
+    window.addEventListener("touchmove", handleTouchMove);
+    window.addEventListener("touchend", stopResizing);
+    window.addEventListener("touchcancel", stopResizing);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", stopResizing);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", stopResizing);
+      window.removeEventListener("touchcancel", stopResizing);
+    };
+  }, [isResizingChat, updateChatWidthFromPointer]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const previousCursor = document.body.style.cursor;
+    if (isResizingChat) {
+      document.body.style.cursor = "col-resize";
+    } else {
+      document.body.style.cursor = "";
+    }
+    return () => {
+      document.body.style.cursor = previousCursor;
+    };
+  }, [isResizingChat]);
 
   // Persist chat for current transcript
   useEffect(() => {
@@ -538,13 +715,37 @@ export default function DashboardPage() {
 
   return (
     <ErrorBoundary>
-      <div className={`dashboard-container flex flex-col lg:flex-row w-full min-h-screen ${
-        theme === "light" 
-          ? "bg-gradient-to-br from-white via-slate-50 to-gray-100" 
+      <div className={`flex min-h-screen ${
+        theme === "light"
+          ? "bg-gradient-to-br from-white via-slate-50 to-gray-100"
           : "bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950"
       }`}>
+        <DashboardSidebar
+          isOpen={isSidebarOpen}
+          onToggle={() => setIsSidebarOpen((prev) => !prev)}
+          transcripts={transcripts}
+          onSelect={handleTranscriptSelect}
+          onNewChat={handleCreateNewTranscript}
+          onDelete={handleTranscriptDelete}
+          onRename={handleTranscriptRename}
+          activeTranscriptId={transcriptId}
+          isLoading={isLoadingTranscripts}
+          theme={theme}
+          userName={userName}
+          userEmail={userEmail}
+          isLoadingUser={isLoadingUser}
+        />
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div
+            ref={layoutRef}
+            className={`dashboard-container flex flex-col lg:flex-row flex-1 w-full ${
+              theme === "light"
+                ? "bg-gradient-to-br from-white/60 via-slate-50/60 to-gray-100/60"
+                : "bg-gradient-to-br from-slate-950/80 via-slate-900/80 to-slate-950/80"
+            }`}
+          >
       {/* Main Content Area - Left Side */}
-      <div className="w-full lg:w-auto lg:flex-1 lg:max-w-[calc(100%-600px)]">
+      <div className="w-full lg:flex-1 min-w-0">
         <div className="dashboard-content p-4 sm:p-6 space-y-4 sm:space-y-6 auto-hide-scrollbar scroll-smooth">
           {notice && (
             <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[100] animate-bounce">
@@ -1070,7 +1271,36 @@ export default function DashboardPage() {
       </div>
 
       {/* Enhanced Fixed Right Chat Panel - Full Height */}
-      <div className="dashboard-chat-panel w-full indus-card chat-panel border-t lg:border-t-0 lg:border-l border-white/10 slide-in-right">
+      <div
+        className="dashboard-chat-panel relative w-full lg:w-auto indus-card chat-panel border-t lg:border-t-0 lg:border-l border-white/10 slide-in-right flex flex-col"
+        style={{
+          flexBasis: `${chatWidthPercent}%`,
+          width: `${chatWidthPercent}%`,
+          minWidth: "300px",
+          maxWidth: "640px",
+        }}
+      >
+        <div
+          className="hidden lg:block absolute -left-3 top-0 bottom-0 w-2 cursor-col-resize"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            updateChatWidthFromPointer(event.clientX);
+            setIsResizingChat(true);
+          }}
+          onTouchStart={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const touch = event.touches[0];
+            updateChatWidthFromPointer(touch ? touch.clientX : null);
+            setIsResizingChat(true);
+          }}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat panel"
+        >
+          <div className="w-2 h-full rounded-full bg-gradient-to-b from-blue-500/40 via-purple-500/40 to-blue-500/40 hover:from-blue-500/60 hover:via-purple-500/60 hover:to-blue-500/60 transition-colors"></div>
+        </div>
         <div className={`flex-shrink-0 p-6 border-b ${
           theme === "light" 
             ? "border-slate-200 bg-gradient-to-r from-white/90 to-slate-50/90 backdrop-blur-sm" 
@@ -1097,122 +1327,9 @@ export default function DashboardPage() {
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <ChatHistoryButton
-                isOpen={isHistoryOpen}
-                onToggle={() => setIsHistoryOpen(!isHistoryOpen)}
-              />
-              <TranscriptSelect
-                activeTranscriptId={transcriptId}
-                onSelect={(id) => {
-                  setTranscriptId(id);
-                  setDashboardTranscriptId(id);
-                  const saved = loadChatFromStorage(id);
-                  setChat(Array.isArray(saved) ? saved : []);
-                  setIsFirstQuestion(false); // Reset first question flag when switching transcripts
-                  setChatKey(prev => prev + 1); // Force re-render
-                }}
-              />
-              <NewChatButton onNew={async () => {
-                try {
-                  // Create a new transcript
-                  const newTranscript = await createTranscript({
-                    title: "New Chat",
-                    metadata: {
-                      created_at: new Date().toISOString(),
-                      source: 'dashboard'
-                    }
-                  });
-                  
-                  // Extract transcript ID from response
-                  const newTranscriptId = (newTranscript as { transcript_id?: string; id?: string })?.transcript_id || (newTranscript as { transcript_id?: string; id?: string })?.id;
-                  
-                  if (newTranscriptId && typeof newTranscriptId === 'string') {
-                    // Clear all chat-related state
-                    setChat([]);
-                    setTranscriptId(newTranscriptId);
-                    setDashboardTranscriptId(newTranscriptId);
-                    setError(null);
-                    ignoreResponsesRef.current = false; // Allow new responses
-                    setIsAwaitingAnswer(false);
-                    setIsFirstQuestion(true); // Mark as first question for new transcript
-                    setChatKey(prev => prev + 1); // Force re-render
-                    
-                    // Force scroll to top of messages
-                    setTimeout(() => {
-                      if (messagesRef.current) {
-                        messagesRef.current.scrollTop = 0;
-                      }
-                    }, 0);
-                    
-                    showSuccess("New chat started");
-                    
-                    // Refresh transcript list
-                    if (typeof window !== "undefined" && (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts) {
-                      (window as unknown as { refreshTranscripts: () => void }).refreshTranscripts();
-                    }
-                  } else {
-                    throw new Error("Failed to create transcript");
-                  }
-                } catch (error) {
-                  console.error("Failed to create new transcript:", error);
-                  setError("Failed to create new chat. Please try again.");
-                }
-              }} />
-            </div>
           </div>
         </div>
         
-        {/* Chat History Panel */}
-        {isHistoryOpen && (
-          <div className="px-4 pb-4">
-            <ChatHistoryPanel
-              activeTranscriptId={transcriptId}
-              onSelect={async (id, _title) => {
-                setTranscriptId(id);
-                setDashboardTranscriptId(id);
-                const saved = loadChatFromStorage(id);
-                setChat(Array.isArray(saved) ? saved : []);
-                setIsFirstQuestion(false);
-                setChatKey(prev => prev + 1);
-                setIsHistoryOpen(false);
-              }}
-              onDelete={async (id) => {
-                try {
-                  await deleteTranscript(id);
-                  
-                  // Show success message immediately
-                  showSuccess("Chat deleted successfully!");
-                  
-                  if (transcriptId === id) {
-                    // If we're deleting the current transcript, create a new one
-                    const newTranscript = await createTranscript({
-                      title: "New Chat",
-                      metadata: { created_at: new Date().toISOString() },
-                    });
-                    const newId = extractTranscriptId(newTranscript);
-                    if (newId) {
-                      setTranscriptId(newId);
-                      setDashboardTranscriptId(newId);
-                      setChat([]);
-                      setIsFirstQuestion(true);
-                      setChatKey(prev => prev + 1);
-                    }
-                  }
-                  
-                  // Refresh the history panel immediately
-                  if (typeof window !== "undefined" && (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts) {
-                    (window as unknown as { refreshTranscripts: () => void }).refreshTranscripts();
-                  }
-                } catch (error) {
-                  console.error("Failed to delete transcript:", error);
-                  setError("Failed to delete chat. Please try again.");
-                }
-              }}
-              onClose={() => setIsHistoryOpen(false)}
-            />
-          </div>
-        )}
         
         {/* Chat Messages */}
         <div ref={messagesRef} className="chat-messages p-6 space-y-6 compact-scrollbar" key={chatKey}>
@@ -1700,215 +1817,218 @@ export default function DashboardPage() {
         onDismiss={() => setError(null)} 
         type="error" 
       />
+    </div>
+  </div>
       </div>
     </ErrorBoundary>
   );
 }
 
-function ChatHistoryPanel({
-  activeTranscriptId,
+function DashboardSidebar({
+  isOpen,
+  onToggle,
+  transcripts,
   onSelect,
+  onNewChat,
   onDelete,
-  onClose,
+  onRename,
+  activeTranscriptId,
+  isLoading,
+  theme,
+  userName,
+  userEmail,
+  isLoadingUser,
 }: {
-  activeTranscriptId: string | null;
-  onSelect: (id: string, title?: string | null) => void | Promise<void>;
+  isOpen: boolean;
+  onToggle: () => void;
+  transcripts: TranscriptSummary[];
+  onSelect: (id: string) => void | Promise<void>;
+  onNewChat: () => Promise<string | null> | void;
   onDelete: (id: string) => void | Promise<void>;
-  onClose: () => void;
+  onRename: (id: string, title: string) => void | Promise<void>;
+  activeTranscriptId: string | null;
+  isLoading: boolean;
+  theme: string;
+  userName: string | null;
+  userEmail: string | null;
+  isLoadingUser: boolean;
 }) {
-  const [items, setItems] = useState<Array<{ id?: string; title?: string | null }>>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const initials = (userName || userEmail || "User").slice(0, 2).toUpperCase();
+  const background = theme === "light"
+    ? "bg-white/80 border-r border-slate-200 shadow-lg shadow-slate-200/40"
+    : "bg-slate-900/70 border-r border-white/10 shadow-lg shadow-black/30";
+  const textMuted = theme === "light" ? "text-slate-500" : "text-slate-400";
+  const highlight = theme === "light"
+    ? "bg-blue-50/80 border border-blue-200/70 text-blue-700"
+    : "bg-blue-500/20 border border-blue-400/40 text-blue-200";
 
-  const loadTranscripts = useCallback(async () => {
-    try {
-      const data = await listTranscripts({});
-      setItems(data);
-    } catch (error) {
-      console.error("Failed to load transcripts:", error);
-    } finally {
-      setLoading(false);
+  const handleRenameClick = (id: string, currentTitle: string | null) => {
+    if (typeof window === "undefined") return;
+    const nextTitle = window.prompt("Rename chat", currentTitle ?? "Untitled");
+    if (nextTitle && nextTitle.trim().length > 0) {
+      void onRename(id, nextTitle);
     }
-  }, []);
+  };
 
-  useEffect(() => {
-    loadTranscripts();
-  }, [loadTranscripts, refreshKey]);
+  const collapsedButtonClass = theme === "light"
+    ? "p-2 rounded-lg text-slate-600 hover:bg-slate-200/70 transition-colors"
+    : "p-2 rounded-lg text-slate-200 hover:bg-white/10 transition-colors";
 
-  useEffect(() => {
-    // Listen for global refresh events
-    const handleRefresh = () => {
-      setRefreshKey(prev => prev + 1);
-    };
-
-    // Set up global refresh listener
-    if (typeof window !== "undefined") {
-      (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts = handleRefresh;
-    }
-
-    return () => {
-      // Clean up global listener
-      if (typeof window !== "undefined") {
-        delete (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts;
-      }
-    };
-  }, []);
-  return (
-    <div className="mb-4 rounded-xl border border-white/10 bg-white/5 p-3">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium">Chat history</span>
-        <button onClick={onClose} className="text-xs text-neutral-400 hover:text-neutral-200">Close</button>
+  const collapsedIcons = (
+    <div className="flex-1 flex flex-col items-center justify-between py-8">
+      <div className="flex flex-col items-center gap-6">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white font-semibold shadow-md">
+          {initials}
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          className={collapsedButtonClass}
+          title="Open chat sidebar"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+            <path d="M6 4a1 1 0 011-1h6a1 1 0 110 2H7A1 1 0 016 4zM4 10a1 1 0 011-1h8a1 1 0 110 2H5a1 1 0 01-1-1zm3 5a1 1 0 011-1h6a1 1 0 110 2H8a1 1 0 01-1-1z" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={collapsedButtonClass}
+          title="Settings"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+            <path fillRule="evenodd" d="M11.983 1.077a1 1 0 00-1.966 0l-.196 1.178a7.036 7.036 0 00-1.51.873l-1.12-.647a1 1 0 00-1.366.366L4.16 4.958a1 1 0 00.366 1.366l1.002.58a7.087 7.087 0 000 1.813l-1.002.58a1 1 0 00-.366 1.366l1.664 2.111a1 1 0 001.366.366l1.12-.647a7.035 7.035 0 001.51.873l.196 1.178a1 1 0 001.966 0l.196-1.178a7.036 7.036 0 001.51-.873l1.12.647a1 1 0 001.366-.366l1.664-2.111a1 1 0 00-.366-1.366l-1.002-.58a7.088 7.088 0 000-1.813l1.002-.58a1 1 0 00.366-1.366l-1.664-2.111a1 1 0 00-1.366-.366l-1.12.647a7.035 7.035 0 00-1.51-.873l-.196-1.178zM10 12a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+          </svg>
+        </button>
       </div>
-      {loading ? (
-        <div className="h-8 skeleton rounded" />
+      <button
+        type="button"
+        onClick={() => { void onNewChat(); }}
+        className="p-3 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 text-white shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 transition-transform hover:scale-105"
+        title="New chat"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+          <path d="M9 3.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 9 3.5Z" />
+        </svg>
+      </button>
+    </div>
+  );
+
+  const transcriptList = (
+    <div className="flex-1 overflow-y-auto pr-2 space-y-2">
+      {isLoading ? (
+        <div className="space-y-2">
+          <div className="h-10 rounded-xl bg-white/10 animate-pulse" />
+          <div className="h-10 rounded-xl bg-white/10 animate-pulse" />
+        </div>
+      ) : transcripts.length === 0 ? (
+        <div className={`rounded-xl border border-dashed p-4 text-sm text-center ${textMuted}`}>
+          No chats yet. Start one to see it here.
+        </div>
       ) : (
-        <ul className="max-h-56 overflow-auto space-y-1 compact-scrollbar">
-          {(items ?? [])?.map((t, i: number) => {
-            const id = extractTranscriptId(t) ?? "";
-            const title = (t as { title?: string | null })?.title ?? null;
-            if (!id) return null;
-            const isActive = activeTranscriptId === id;
-            return (
-              <li key={id || i} className={"flex items-center justify-between gap-2 px-2 py-1.5 rounded " + (isActive ? "bg-white/10" : "hover:bg-white/5") }>
+        transcripts.map(({ id, title }) => {
+          const isActive = activeTranscriptId === id;
+          return (
+            <div
+              key={id}
+              className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 transition-all duration-200 ${
+                isActive
+                  ? highlight
+                  : theme === "light"
+                    ? "bg-white/70 border-slate-200 hover:border-blue-400/60 hover:bg-blue-50/60"
+                    : "bg-white/5 border-white/10 hover:border-blue-400/40 hover:bg-white/10"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => { void onSelect(id); }}
+                className="flex-1 text-left truncate font-medium"
+                title={title ?? "Untitled"}
+              >
+                {title ? title : "Untitled"}
+              </button>
+              <div className="flex items-center gap-1">
                 <button
-                  className="text-left flex-1 truncate"
-                  onClick={() => onSelect(id, title)}
-                  title={title ?? id}
+                  type="button"
+                  onClick={() => handleRenameClick(id, title)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
+                  title="Rename chat"
                 >
-                  <span className="text-xs text-neutral-400 mr-2">{id.slice(0, 6)}</span>
-                  <span className="text-sm">{title ?? "Untitled"}</span>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path d="M13.586 3.586a2 2 0 012.828 2.828l-7.5 7.5A2 2 0 018.5 14.5H6a1 1 0 01-1-1v-2.5a2 2 0 01.586-1.414l7.5-7.5z" />
+                    <path d="M5 16a1 1 0 011-1h9a1 1 0 110 2H6a1 1 0 01-1-1z" />
+                  </svg>
                 </button>
                 <button
-                  onClick={() => onDelete(id)}
-                  className="text-xs text-neutral-400 hover:text-red-400"
-                  title="Delete"
+                  type="button"
+                  onClick={() => { void onDelete(id); }}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                  title="Delete chat"
                 >
-                  ✕
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 100 2h.293l.852 9.373A2 2 0 007.135 17h5.73a2 2 0 001.99-1.627L15.707 6H16a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM8 8a1 1 0 012 0v5a1 1 0 11-2 0V8zm4 0a1 1 0 012 0v5a1 1 0 11-2 0V8z" clipRule="evenodd" />
+                  </svg>
                 </button>
-              </li>
-            );
-          })}
-        </ul>
+              </div>
+            </div>
+          );
+        })
       )}
     </div>
   );
-}function TranscriptSelect({
-  activeTranscriptId,
-  onSelect,
-}: {
-  activeTranscriptId: string | null;
-  onSelect: (id: string, title?: string | null) => void | Promise<void>;
-}) {
-  const [items, setItems] = useState<Array<{ id?: string; title?: string | null }>>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  const loadTranscripts = useCallback(async () => {
-    try {
-      const data = await listTranscripts({});
-      setItems(data);
-    } catch (error) {
-      console.error("Failed to load transcripts:", error);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadTranscripts().finally(() => setLoading(false));
-  }, [loadTranscripts, refreshKey]);
-
-  useEffect(() => {
-    // Expose refresh function globally
-    (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts = () => {
-      setRefreshKey(prev => prev + 1);
-    };
-    
-    return () => {
-      delete (window as unknown as { refreshTranscripts?: () => void }).refreshTranscripts;
-    };
-  }, []);
-  const isEmpty = !activeTranscriptId;
   return (
-    <select
-      className={
-        "inline-block text-sm rounded-full border px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary/50 bg-gray-800 text-white max-w-[200px] min-w-[150px] " +
-        (isEmpty ? "border-white/50" : "border-white/40")
-      }
-      style={{ 
-        backgroundColor: '#1f2937', 
-        color: 'white',
-        borderColor: 'rgba(255, 255, 255, 0.2)',
-        width: '200px',
-        maxWidth: '200px',
-        minWidth: '150px'
-      }}
-      value={activeTranscriptId ?? "__placeholder__"}
-      onChange={(e) => {
-        const id = e.target.value;
-        if (id === "__placeholder__") return;
-        const found = items.find((t) => extractTranscriptId(t) === id);
-        const title = (found as { title?: string | null } | undefined)?.title ?? null;
-        if (id) onSelect(id, title);
-      }}
+    <aside
+      className={`flex flex-col transition-all duration-300 ${isOpen ? "w-72 px-4" : "w-16 px-2"} ${background}`}
     >
-      <option value="__placeholder__">Select transcript…</option>
-      {items.map((t, i) => {
-        const id = extractTranscriptId(t) ?? "";
-        const title = (t as { title?: string | null })?.title ?? null;
-        if (!id) return null;
-        return (
-          <option key={id || i} value={id} title={title ?? "Untitled"}>
-            {(title ?? "Untitled").length > 30 ? `${(title ?? "Untitled").slice(0, 30)}...` : (title ?? "Untitled")}
-          </option>
-        );
-      })}
-    </select>
-  );
-}
-
-function ChatHistoryButton({ isOpen, onToggle }: { isOpen: boolean; onToggle: () => void }) {
-  const { theme } = useTheme();
-  
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-200 pressable hover-scale ${
-        isOpen 
-          ? theme === "light"
-            ? "bg-blue-50 text-blue-700 border border-blue-200 shadow-sm"
-            : "bg-blue-500/20 text-blue-300 border border-blue-500/30"
-          : theme === "light"
-            ? "bg-white/80 text-slate-600 hover:bg-blue-50 hover:text-blue-700 border border-slate-200 shadow-sm"
-            : "bg-white/10 text-slate-300 hover:bg-white/20 hover:text-white border border-white/20"
-      }`}
-      title="View chat history"
-    >
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-        <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clipRule="evenodd" />
-      </svg>
-      <span>History</span>
-    </button>
-  );
-}
-
-function NewChatButton({ onNew }: { onNew: () => void }) {
-  const { theme } = useTheme();
-  
-  return (
-    <button
-      type="button"
-      onClick={onNew}
-      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-200 pressable hover-scale group ${
-        theme === "light"
-          ? "bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white shadow-lg shadow-blue-500/30"
-          : "bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white shadow-lg shadow-blue-500/30"
-      }`}
-      title="Start a new chat"
-    >
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-white group-hover:rotate-90 transition-transform duration-200">
-        <path d="M9 3.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 9 3.5Z" />
-      </svg>
-      <span className="text-white">New Chat</span>
-    </button>
+      <div className={`py-6 ${isOpen ? "flex items-center justify-between" : "flex flex-col items-center gap-4"}`}>
+        <div className={`flex ${isOpen ? "items-center gap-3" : "flex-col items-center gap-2"}`}>
+          <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white font-semibold shadow-lg shadow-blue-500/30">
+            {initials}
+          </div>
+          {isOpen && (
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                {isLoadingUser ? "Loading..." : userName || userEmail || "User"}
+              </p>
+              <p className={`text-xs truncate ${textMuted}`}>
+                {isLoadingUser ? "" : userEmail || "dashboard user"}
+              </p>
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          className={`p-2 rounded-lg transition-colors ${theme === "light" ? "text-slate-500 hover:bg-slate-200/60" : "text-slate-300 hover:bg-white/10"}`}
+          title={isOpen ? "Collapse sidebar" : "Expand sidebar"}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-5 h-5 transition-transform ${isOpen ? "" : "rotate-180"}`}>
+            <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L10.414 9H16a1 1 0 110 2h-5.586l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+        </button>
+      </div>
+      {isOpen ? (
+        <>
+          <div className="mt-2">
+            <div className={`text-xs font-semibold uppercase tracking-wider mb-3 ${textMuted}`}>Transcripts</div>
+            {transcriptList}
+          </div>
+          <div className="pt-4 mt-4 border-t border-white/10">
+            <button
+              type="button"
+              onClick={() => { void onNewChat(); }}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 transition-transform hover:scale-[1.02]"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                <path d="M9 3.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 9 3.5Z" />
+              </svg>
+              Start New Chat
+            </button>
+          </div>
+        </>
+      ) : (
+        collapsedIcons
+      )}
+    </aside>
   );
 }
